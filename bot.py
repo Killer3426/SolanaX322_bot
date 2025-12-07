@@ -10,13 +10,14 @@ import torch.optim as optim
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from datetime import datetime, timedelta
+import asyncio  # Добавлено для v21
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Ключи
-TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN_HERE'
+# Ключи (из env vars)
+TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN_HERE'  # Render подставит из env
 MORALIS_API_KEY = 'YOUR_MORALIS_API_KEY_HERE'
 
 # Файлы для persistence
@@ -139,7 +140,7 @@ def find_tokens():
             filtered.append((token, metadata))
         
         # Добавляем в historical для ML
-        if address not in [t['address'] for t in historical]:
+        if address not in [t.get('address', '') for t in historical]:
             new_historical.append(token)  # Добавляем price_change etc. later if needed
     
     save_historical(new_historical[:500])  # Limit history
@@ -196,20 +197,20 @@ last_check = datetime.now() - timedelta(minutes=5)
 def check_and_notify(application):
     global last_check
     filtered = find_tokens()
-    recent_filtered = [t for t in filtered if datetime.fromtimestamp(t[0]['created_timestamp']/1000) > last_check]
+    recent_filtered = [t for t in filtered if datetime.fromtimestamp(t[0].get('created_timestamp', 0)/1000) > last_check]
     
     if recent_filtered:
-        message = "Новые потенциальные топы на pump.fun:\n\n" + format_tokens(recent_filtered)
+        message = "Новые потенциальные топы на pump.fun:\n\n" + format_tokens([list(t) for t in recent_filtered])  # Адаптация для list/tuple
         subscribers = load_subscribers()
         for chat_id in subscribers:
             try:
-                application.bot.send_message(chat_id=chat_id, text=message)
+                asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=chat_id, text=message), application.loop)
             except Exception as e:
                 logger.error(f"Error sending to {chat_id}: {e}")
     
     last_check = datetime.now()
 
-# Schedule задачи
+# Schedule задачи (адаптировано для v21)
 def run_schedule(application):
     schedule.every(5).minutes.do(check_and_notify, application=application)
     schedule.every(30).minutes.do(train_model)
@@ -218,8 +219,18 @@ def run_schedule(application):
         schedule.run_pending()
         time.sleep(1)
 
-# Основная функция
+# Основная функция (обновлено для v21: без Updater)
 def main():
+    global TELEGRAM_TOKEN, MORALIS_API_KEY  # Для env vars
+    # Подставляем env vars (Render их экспортирует)
+    import os
+    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', TELEGRAM_TOKEN)
+    MORALIS_API_KEY = os.getenv('MORALIS_API_KEY', MORALIS_API_KEY)
+    
+    if 'YOUR_' in TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN not set!")
+        return
+    
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
@@ -235,6 +246,8 @@ def main():
     # Начальная тренировка
     train_model()
     
+    # Запуск polling (v21 стиль)
+    logger.info("Bot started")
     application.run_polling()
 
 if __name__ == '__main__':
