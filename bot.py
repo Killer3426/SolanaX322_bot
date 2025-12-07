@@ -4,93 +4,21 @@ import json
 import time
 import threading
 import schedule
-import torch
-import torch.nn as nn
-import torch.optim as optim
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from datetime import datetime, timedelta
-import asyncio  # Добавлено для v21
+import os  # Для env vars
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Ключи (из env vars)
-TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN_HERE'  # Render подставит из env
-MORALIS_API_KEY = 'YOUR_MORALIS_API_KEY_HERE'
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN_HERE')
+MORALIS_API_KEY = os.getenv('MORALIS_API_KEY', 'YOUR_MORALIS_API_KEY_HERE')
 
 # Файлы для persistence
 SUBSCRIBERS_FILE = 'subscribers.txt'
-HISTORICAL_FILE = 'historical_tokens.json'
-
-# ML модель: Простая NN для scoring (features: liquidity, holders, price_change)
-class TokenScorer(nn.Module):
-    def __init__(self):
-        super(TokenScorer, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()  # Score 0-1
-        )
-    
-    def forward(self, x):
-        return self.fc(x)
-
-model = TokenScorer()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-criterion = nn.BCELoss()
-
-# Загрузка/сохранение исторических данных и модели
-def load_historical():
-    try:
-        with open(HISTORICAL_FILE, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-
-def save_historical(data):
-    with open(HISTORICAL_FILE, 'w') as f:
-        json.dump(data, f)
-
-# Тренировка модели на исторических (предполагаем labels: 1 если price_change > 10%, else 0)
-def train_model():
-    historical = load_historical()
-    if len(historical) < 10:
-        logger.info("Not enough data for training.")
-        return
-    
-    features = []
-    labels = []
-    for token in historical:
-        liq = float(token.get('usd_liquidity', 0))
-        holders = token.get('holders_count', 0)
-        change = float(token.get('price_change', 0))
-        features.append([liq, holders, change])
-        labels.append(1 if change > 0.1 else 0)  # Пример: >10% рост = топ
-    
-    X = torch.tensor(features, dtype=torch.float32)
-    y = torch.tensor(labels, dtype=torch.float32).unsqueeze(1)
-    
-    for epoch in range(100):
-        optimizer.zero_grad()
-        outputs = model(X)
-        loss = criterion(outputs, y)
-        loss.backward()
-        optimizer.step()
-    
-    logger.info("Model trained.")
-
-# Score токена с ML
-def get_ml_score(token):
-    liq = float(token.get('usd_liquidity', 0))
-    holders = token.get('holders_count', 0)
-    change = float(token.get('price_change', 0))
-    input_tensor = torch.tensor([[liq, holders, change]], dtype=torch.float32)
-    with torch.no_grad():
-        score = model(input_tensor).item()
-    return score
 
 # Получение новых токенов с pump.fun
 def get_new_pumpfun_tokens(limit=10):
@@ -112,9 +40,10 @@ def get_token_metadata(address):
         return response.json()
     return None
 
-# Фильтрация потенциального топа (security + ML score)
+# Фильтрация потенциального топа (только security + базовые метрики, без ML)
 def is_potential_top_token(token_data, metadata):
     security = metadata.get('security', {})
+    # Базовые фильтры на скам
     if (
         not security.get('is_honeypot', False) and
         float(security.get('buy_tax', 0)) < 0.1 and
@@ -122,28 +51,26 @@ def is_potential_top_token(token_data, metadata):
         not security.get('cannot_sell_all', False) and
         security.get('is_open_source', True)
     ):
-        score = get_ml_score(token_data)
-        return score > 0.7  # ML-фильтр
+        # Дополнительно: базовый "score" по метрикам (адаптация под тренды)
+        holders = token_data.get('holders_count', 0)
+        volume = float(token_data.get('volume_24h', 0))
+        if holders > 50 and volume > 10000:  # Простой фильтр на активность
+            return True
     return False
 
 # Основная функция поиска
 def find_tokens():
     tokens = get_new_pumpfun_tokens(limit=20)  # Больше для фильтра
-    historical = load_historical()
-    new_historical = historical.copy()
     filtered = []
     
     for token in tokens:
-        address = token['address']
+        address = token.get('address', '')
+        if not address:
+            continue
         metadata = get_token_metadata(address)
         if metadata and is_potential_top_token(token, metadata):
             filtered.append((token, metadata))
-        
-        # Добавляем в historical для ML
-        if address not in [t.get('address', '') for t in historical]:
-            new_historical.append(token)  # Добавляем price_change etc. later if needed
     
-    save_historical(new_historical[:500])  # Limit history
     return filtered
 
 # Форматирование сообщения
@@ -156,7 +83,7 @@ def format_tokens(filtered):
         created = token.get('created_timestamp', 'N/A')
         address = token['address']
         message += f"📈 {name} ({symbol})\nЦена: ${price}\nСоздан: {created}\nАдрес: {address}\nDexScreener: https://dexscreener.com/solana/{address}\n\n"
-    return message if filtered else "Нет подходящих токенов сейчас."
+    return message if filtered else "Нет подходящих токенов сейчас. Попробуй позже!"
 
 # Команда /start
 async def start(update: Update, context):
@@ -200,35 +127,31 @@ def check_and_notify(application):
     recent_filtered = [t for t in filtered if datetime.fromtimestamp(t[0].get('created_timestamp', 0)/1000) > last_check]
     
     if recent_filtered:
-        message = "Новые потенциальные топы на pump.fun:\n\n" + format_tokens([list(t) for t in recent_filtered])  # Адаптация для list/tuple
+        message = "Новые потенциальные топы на pump.fun:\n\n" + format_tokens(recent_filtered)
         subscribers = load_subscribers()
         for chat_id in subscribers:
             try:
-                asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=chat_id, text=message), application.loop)
+                application.bot.send_message(chat_id=chat_id, text=message)
             except Exception as e:
                 logger.error(f"Error sending to {chat_id}: {e}")
     
     last_check = datetime.now()
 
-# Schedule задачи (адаптировано для v21)
+# Schedule задачи
 def run_schedule(application):
-    schedule.every(5).minutes.do(check_and_notify, application=application)
-    schedule.every(30).minutes.do(train_model)
-    
+    schedule.every(5).minutes.do(lambda: check_and_notify(application))
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# Основная функция (обновлено для v21: без Updater)
+# Основная функция
 def main():
-    global TELEGRAM_TOKEN, MORALIS_API_KEY  # Для env vars
-    # Подставляем env vars (Render их экспортирует)
-    import os
-    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', TELEGRAM_TOKEN)
-    MORALIS_API_KEY = os.getenv('MORALIS_API_KEY', MORALIS_API_KEY)
-    
     if 'YOUR_' in TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN not set!")
+        logger.error("TELEGRAM_TOKEN not set! Add it in Render Environment.")
+        return
+    
+    if 'YOUR_' in MORALIS_API_KEY:
+        logger.error("MORALIS_API_KEY not set! Add it in Render Environment.")
         return
     
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -243,10 +166,6 @@ def main():
     # Запуск schedule в фоне
     threading.Thread(target=run_schedule, args=(application,), daemon=True).start()
     
-    # Начальная тренировка
-    train_model()
-    
-    # Запуск polling (v21 стиль)
     logger.info("Bot started")
     application.run_polling()
 
