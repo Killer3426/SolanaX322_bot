@@ -1,3 +1,5 @@
 python-telegram-bot==21.5
 requests
 schedule
+torch==2.5.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+tweepy==4.14.0
