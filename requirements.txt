@@ -1,4 +1,4 @@
-python-telegram-bot==20.8
+python-telegram-bot==21.5
 requests
 schedule
-torch
+torch==2.1.2+cpu --index-url https://download.pytorch.org/whl/cpu
