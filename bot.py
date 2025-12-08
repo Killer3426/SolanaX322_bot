@@ -26,14 +26,9 @@ def get_metadata(addr):
     return r.json() if r.status_code == 200 else None
 
 def is_good_token(token, meta):
-    s = meta.get('security', {})
-    return (not s.get('is_honeypot', True) and
-            float(s.get('buy_tax', 99)) < 8 and
-            float(s.get('sell_tax', 99)) < 8 and
-            s.get('is_open_source', False) and
-            token.get('holders_count', 0) > 80 and
-            float(token.get('volume_24h', 0)) > 15000)
-
+    # Самый лёгкий фильтр — пропускаем почти всё новое
+    return True   # ← вот и всё! Покажет все свежие токены с pump.fun
+    
 def find_and_send():
     global last_check
     tokens = get_new_tokens()
